@@ -11,10 +11,10 @@ urlpatterns = [
     path("api/v1/schema/", SpectacularAPIView.as_view(), name="schema"),
 
     # Swagger UI
-    path("api/v1/docs/swagger/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
+    path("", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
 
     # ReDoc UI
-    path("api/v1/docs/redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),
+    path("redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),
 
     # Apps
     path("api/v1/accounts/", include(("accounts.urls", "accounts"), namespace="accounts")),
