@@ -320,3 +320,5 @@ STORAGES = {
 # DEFAULT PRIMARY KEY FIELD
 # ----------------------------
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+TOTP_ISSUER_NAME = "FreeAPI"

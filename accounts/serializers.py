@@ -1,33 +1,15 @@
-from urllib.parse import quote
-
-from django.conf import settings
 from rest_framework import serializers
+from django.utils import timezone
 
-from accounts.models import User, UserPresence, UserSecurity
+from accounts.models import User
 from core.constants import ROLE_CHOICES
 
-# ----------------------------
-# Nested Serializers for Related Models
-# ----------------------------
-class UserPresenceSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = UserPresence
-        fields = ["is_online", "last_seen", "status_message"]
-        read_only_fields = ["is_online", "last_seen", "status_message"]
 
-class UserSecuritySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = UserSecurity
-        fields = ["is_2fa_enabled"]
-        read_only_fields = ["is_2fa_enabled"]
-
-# ----------------------------
-# User Serializer (Main)
-# ----------------------------
+# =====================================================
+# User Serializer (Public Profile)
+# =====================================================
 class UserSerializer(serializers.ModelSerializer):
-    avatar_url = serializers.SerializerMethodField(help_text="Full URL to user's avatar")
-    presence = UserPresenceSerializer(read_only=True)
-    security = UserSecuritySerializer(read_only=True)
+    avatar_url = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -37,19 +19,29 @@ class UserSerializer(serializers.ModelSerializer):
             "username",
             "role",
             "is_verified",
+            "is_online",
+            "last_seen",
+            "status_message",
+            "is_2fa_enabled",
             "avatar_url",
-            "presence",
-            "security",
         ]
-        read_only_fields = ["id", "avatar_url", "presence", "security"]
+        read_only_fields = [
+            "id",
+            "email",
+            "is_verified",
+            "is_online",
+            "last_seen",
+            "is_2fa_enabled",
+            "avatar_url",
+        ]
 
     def get_avatar_url(self, obj):
-        """Return full URL for avatar or fallback to UI Avatar."""
-        return obj.avatar_url  
-    
-# ----------------------------
+        return obj.avatar_url
+
+
+# =====================================================
 # Register Serializer
-# ----------------------------
+# =====================================================
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=6)
 
@@ -57,143 +49,184 @@ class RegisterSerializer(serializers.ModelSerializer):
         model = User
         fields = ["email", "username", "password"]
 
+    def validate_email(self, value):
+        if User.objects.filter(email=value).exists():
+            raise serializers.ValidationError("Email already registered.")
+        return value
+
+    def validate_username(self, value):
+        if User.objects.filter(username=value).exists():
+            raise serializers.ValidationError("Username already taken.")
+        return value
+
     def create(self, validated_data):
-        """Create a new user with hashed password."""
         user = User(
             email=validated_data["email"],
-            username=validated_data["username"]
+            username=validated_data["username"],
         )
         user.set_password(validated_data["password"])
         user.save()
         return user
 
-# ----------------------------
-# Verify Email Serializer
-# ----------------------------
-class VerifyEmailSerializer(serializers.Serializer):
-    token = serializers.CharField(help_text="Email verification token")
 
-# ----------------------------
+# =====================================================
 # Login Serializer
-# ----------------------------
+# =====================================================
 class LoginSerializer(serializers.Serializer):
-    email = serializers.EmailField(help_text="User email for login")
-    password = serializers.CharField(write_only=True, help_text="User password")
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True)
     token = serializers.CharField(
-        write_only=True, required=False, allow_blank=True, default=""
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        default="",
+        help_text="TOTP token if 2FA enabled",
     )
 
-# ----------------------------
-# Forgot Password Serializer
-# ----------------------------
+
+# =====================================================
+# Verify Email Serializer
+# =====================================================
+class VerifyEmailSerializer(serializers.Serializer):
+    token = serializers.CharField()
+
+
+# =====================================================
+# Resend Email Verification
+# =====================================================
+class ResendEmailVerificationSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    def validate(self, attrs):
+        email = attrs.get("email")
+
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            raise serializers.ValidationError(
+                {"email": "No account found with this email."}
+            )
+
+        if user.is_verified:
+            raise serializers.ValidationError(
+                {"email": "Email is already verified."}
+            )
+
+        attrs["user"] = user
+        return attrs
+
+
+# =====================================================
+# Forgot Password
+# =====================================================
 class ForgotPasswordSerializer(serializers.Serializer):
-    email = serializers.EmailField(help_text="Email to send reset password link")
+    email = serializers.EmailField()
 
-# ----------------------------
-# Reset Password Serializer
-# ----------------------------
+    def validate_email(self, value):
+        if not User.objects.filter(email=value).exists():
+            raise serializers.ValidationError("No account found with this email.")
+        return value
+
+
+# =====================================================
+# Reset Password
+# =====================================================
 class ResetPasswordSerializer(serializers.Serializer):
-    token = serializers.CharField(help_text="Password reset token")
-    new_password = serializers.CharField(
-        write_only=True, min_length=6, help_text="New password to set"
-    )
+    token = serializers.CharField()
+    new_password = serializers.CharField(write_only=True, min_length=6)
 
-# ----------------------------
-# Change Password Serializer
-# ----------------------------
+
+# =====================================================
+# Change Password
+# =====================================================
 class ChangePasswordSerializer(serializers.Serializer):
-    old_password = serializers.CharField(write_only=True, help_text="Current password")
-    new_password = serializers.CharField(write_only=True, min_length=6, help_text="New password")
+    old_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True, min_length=6)
 
     def validate(self, attrs):
         user = self.context["request"].user
+
         if not user.check_password(attrs["old_password"]):
-            raise serializers.ValidationError({"old_password": "Old password is incorrect."})
-        return attrs
-    
-# ----------------------------
-# Resend Email Verification Serializer
-# ----------------------------
-class ResendEmailVerificationSerializer(serializers.Serializer):
-    email = serializers.EmailField(help_text="Email to resend verification")
+            raise serializers.ValidationError(
+                {"old_password": "Old password is incorrect."}
+            )
 
-    def validate_email(self, value):
-        """Ensure the email exists and is not already verified."""
-        try:
-            user = User.objects.get(email=value)
-        except User.DoesNotExist:
-            raise serializers.ValidationError("No account found with this email.")
+        if attrs["old_password"] == attrs["new_password"]:
+            raise serializers.ValidationError(
+                {"new_password": "New password must be different."}
+            )
 
-        if user.is_verified:
-            raise serializers.ValidationError("This email is already verified.")
-
-        self.context["user"] = user
-        return value
-
-    def validate(self, attrs):
-        """Attach user to validated data."""
-        attrs["user"] = self.context["user"]
         return attrs
 
-# ----------------------------
-# Avatar Serializer
-# ----------------------------
+
+# =====================================================
+# Update Avatar
+# =====================================================
 class UpdateAvatarSerializer(serializers.ModelSerializer):
-    avatar = serializers.ImageField(required=True, allow_null=False, help_text="Upload new avatar image")
-    
+    avatar = serializers.URLField(required=True)
+
     class Meta:
         model = User
         fields = ["avatar"]
 
-# ----------------------------
-# Role Serializer
-# ----------------------------
+
+# =====================================================
+# Change Role
+# =====================================================
 class ChangeRoleSerializer(serializers.Serializer):
-    user_id = serializers.UUIDField(required=True, help_text="User ID to change role")
-    role = serializers.ChoiceField(choices=ROLE_CHOICES, required=True, help_text="New role")
+    user_id = serializers.UUIDField(required=True)
+    role = serializers.ChoiceField(choices=ROLE_CHOICES)
 
-# ----------------------------
-# OAuth Callback
-# ----------------------------
-class OAuthCallbackSerializer(serializers.Serializer):
-    code = serializers.CharField(required=True, help_text="OAuth authorization code")
+    def validate_user_id(self, value):
+        if not User.objects.filter(id=value).exists():
+            raise serializers.ValidationError("User not found.")
+        return value
 
-# ----------------------------
-# Empty Serializer
-# ----------------------------
-class EmptySerializer(serializers.Serializer):
-    pass
 
-# ----------------------------
-# Refresh Token
-# ----------------------------
+# =====================================================
+# Refresh Token Input
+# =====================================================
 class RefreshTokenInputSerializer(serializers.Serializer):
-    refresh = serializers.CharField(required=True, help_text="Refresh token string")
+    refresh_token = serializers.CharField(required=True)
 
-# ----------------------------
-# Enable 2FA Serializer
-# ----------------------------
+
+# =====================================================
+# Enable 2FA
+# =====================================================
 class Enable2FASerializer(serializers.Serializer):
     token = serializers.CharField(
-        required=True,
         write_only=True,
-        help_text="TOTP token generated by authenticator app to enable 2FA",
+        help_text="TOTP token generated by authenticator app"
     )
 
-# ----------------------------
-# Disable 2FA Serializer
-# ----------------------------
+
+# =====================================================
+# Disable 2FA
+# =====================================================
 class Disable2FASerializer(serializers.Serializer):
     token = serializers.CharField(
-        required=True,
         write_only=True,
-        help_text="TOTP token to confirm disabling 2FA",
+        help_text="TOTP token to confirm disabling 2FA"
     )
 
-# ----------------------------
-# Setup 2FA Serializer
-# ----------------------------
+
+# =====================================================
+# Setup 2FA (Response Serializer)
+# =====================================================
 class Setup2FASerializer(serializers.Serializer):
-    totp_uri = serializers.CharField(read_only=True, help_text="TOTP URI for authenticator app")
-    qr_code = serializers.CharField(read_only=True, help_text="Base64 QR code for scanning")
-    
+    totp_uri = serializers.CharField(read_only=True)
+    qr_code = serializers.CharField(read_only=True)
+
+
+# =====================================================
+# OAuth Callback
+# =====================================================
+class OAuthCallbackSerializer(serializers.Serializer):
+    code = serializers.CharField(required=True)
+
+
+# =====================================================
+# Empty Serializer
+# =====================================================
+class EmptySerializer(serializers.Serializer):
+    pass

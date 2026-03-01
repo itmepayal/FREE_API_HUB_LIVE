@@ -3,6 +3,7 @@ import secrets
 import hashlib
 import requests
 from urllib.parse import urlencode
+from datetime import timedelta
 from django.shortcuts import redirect
 from django.contrib.auth import login, authenticate
 from django.utils import timezone
@@ -10,7 +11,7 @@ from django.conf import settings
 from rest_framework import generics, status, permissions
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework.parsers import MultiPartParser, FormParser
 from accounts.models import User
@@ -67,6 +68,10 @@ logger = get_logger(__name__)
 # ----------------------
 # Helper function for generating JWT tokens
 # ----------------------
+def generate_access_token(user):
+    access = AccessToken.for_user(user)
+    return str(access)
+
 def generate_jwt_tokens(user):
     """
     Generate JWT access and refresh tokens for a given user.
@@ -160,11 +165,6 @@ class VerifyEmailView(generics.GenericAPIView):
 # ----------------------
 @login_schema
 class LoginView(generics.GenericAPIView):
-    """
-    Authenticates a user with email and password.
-    Handles 2FA if enabled.
-    Returns access and refresh tokens on successful login.
-    """
     serializer_class = LoginSerializer
     permission_classes = [permissions.AllowAny]
 
@@ -182,28 +182,24 @@ class LoginView(generics.GenericAPIView):
             logger.warning(f"Failed login attempt for email: {email}")
             return api_response(False, "Invalid credentials", status_code=status.HTTP_401_UNAUTHORIZED)
 
-        # Check if email is verified
+        # Check email verification
         if not user.is_verified:
-            logger.warning(f"Unverified user {email} attempted login.")
             return api_response(False, "Email not verified", status_code=status.HTTP_403_FORBIDDEN)
 
-        # 2FA verification if enabled
+        # 2FA check
         if user.is_2fa_enabled:
             if not token or not user.verify_totp(token):
-                logger.warning(f"2FA failed for user {email}")
                 return api_response(False, "Invalid or missing 2FA token", status_code=status.HTTP_400_BAD_REQUEST)
 
-        # Login user and store session info
+        # Login session
         login(request, user)
-        request.session['ip'] = get_client_ip(request)
-        request.session['user_agent'] = request.META.get("HTTP_USER_AGENT", "")
+        request.session["ip"] = get_client_ip(request)
+        request.session["user_agent"] = request.META.get("HTTP_USER_AGENT", "")
 
-        # Generate JWT tokens
-        access_token, refresh_token = generate_jwt_tokens(user)
-        user.refresh_token = refresh_token
-        user.save(update_fields=["refresh_token"])
-        
-        logger.info(f"User {user.email} logged in successfully from IP {get_client_ip(request)}")
+        access_token = generate_access_token(user)
+        refresh_token = user.generate_refresh_token()
+
+        logger.info(f"User {user.email} logged in successfully")
 
         return api_response(
             True,
@@ -211,9 +207,9 @@ class LoginView(generics.GenericAPIView):
             data={
                 "user": UserSerializer(user).data,
                 "access_token": access_token,
-                "refresh_token": refresh_token
+                "refresh_token": refresh_token,
             },
-            status_code=status.HTTP_200_OK
+            status_code=status.HTTP_200_OK,
         )
 
 # ----------------------
@@ -221,19 +217,20 @@ class LoginView(generics.GenericAPIView):
 # ----------------------
 @logout_schema
 class LogoutView(generics.GenericAPIView):
-    """
-    Logs out the authenticated user.
-    Invalidates refresh token and clears session.
-    """
     serializer_class = EmptySerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        user = request.user 
-        user.refresh_token = None
-        user.save(update_fields=["refresh_token"])
+        user = request.user
+
+        # Revoke refresh token securely
+        user.revoke_refresh_token()
+
         logger.info(f"User {user.email} (ID: {user.id}) logged out.")
+
+        # Clear session
         request.session.flush()
+
         return api_response(True, "Logged out successfully")
 
 # ----------------------
@@ -241,31 +238,43 @@ class LogoutView(generics.GenericAPIView):
 # ----------------------
 @refresh_token_schema
 class RefreshTokenView(generics.GenericAPIView):
-    """
-    Refreshes the access token using a valid refresh token.
-    """
     serializer_class = RefreshTokenInputSerializer
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        refresh_token = serializer.validated_data.get("refresh")
 
-        user = User.objects.filter(refresh_token=refresh_token, is_active=True).first()
+        refresh_token = serializer.validated_data.get("refresh_token")
+
+        # Find active users only
+        users = User.objects.filter(is_active=True)
+
+        user = None
+        for u in users:
+            if u.verify_refresh_token(refresh_token):
+                user = u
+                break
+
         if not user:
             logger.warning("Invalid refresh token attempt detected.")
-            return api_response(False, "Invalid or expired refresh token", status_code=status.HTTP_401_UNAUTHORIZED)
+            return api_response(
+                False,
+                "Invalid or expired refresh token",
+                status_code=status.HTTP_401_UNAUTHORIZED
+            )
 
-        try:
-            token = RefreshToken(refresh_token)
-            access_token = str(token.access_token)
-            logger.info(f"Access token refreshed successfully for user {user.email}")
-            return api_response(True, "Token refreshed successfully", data={"access_token": access_token})
-        except TokenError as e:
-            logger.error(f"Refresh token error for {user.email if user else 'unknown'}: {str(e)}")
-            return api_response(False, f"Invalid or expired refresh token: {str(e)}", status_code=status.HTTP_401_UNAUTHORIZED)
+        # Generate new access token (your function)
+        access_token = generate_access_token(user)
 
+        logger.info(f"Access token refreshed successfully for user {user.email}")
+
+        return api_response(
+            True,
+            "Token refreshed successfully",
+            data={"access_token": access_token}
+        )
+        
 # ----------------------
 # Forgot Password
 # ----------------------
@@ -372,9 +381,6 @@ class ChangePasswordView(generics.GenericAPIView):
 # ----------------------
 @resend_verification_email_schema
 class ResendEmailView(generics.GenericAPIView):
-    """
-    Resends email verification token to the user.
-    """
     serializer_class = ResendEmailVerificationSerializer
     permission_classes = [permissions.AllowAny]
 
@@ -383,25 +389,44 @@ class ResendEmailView(generics.GenericAPIView):
         serializer.is_valid(raise_exception=True)
         user = serializer.validated_data["user"]
 
-        # Generate new token
+        if not user.is_active:
+            return api_response(False, "Account is inactive", status_code=400)
+
+        if user.is_verified:
+            return api_response(False, "Email already verified", status_code=400)
+
+        # Optional anti-spam protection
+        if (
+            user.email_verification_expiry
+            and user.email_verification_expiry > timezone.now()
+        ):
+            return api_response(False, "Verification email already sent. Please wait.", status_code=400)
+
+        # Generate token
         un_hashed = secrets.token_hex(20)
-        hashed = hashlib.sha256(un_hashed.encode()).hexdigest()
-        expiry = timezone.now() + timezone.timedelta(minutes=10)
+        hashed = user._hash_token(un_hashed)
+
         user.email_verification_token = hashed
-        user.email_verification_expiry = expiry
+        user.email_verification_expiry = timezone.now() + timedelta(minutes=10)
         user.save(update_fields=["email_verification_token", "email_verification_expiry"])
 
         verify_link = f"{settings.FRONTEND_URL}/verify-email/{un_hashed}"
+
         send_email(
             to_email=user.email,
             subject="Verify your email",
             template_name="email_verification",
-            context={"username": user.username, "verification_code": un_hashed, "verify_link": verify_link},
+            context={
+                "username": user.username,
+                "verification_code": un_hashed,
+                "verify_link": verify_link,
+            },
         )
 
         logger.info(f"Verification email resent to {user.email}")
-        return api_response(True, "Verification email resent successfully.")
 
+        return api_response(True, "Verification email resent successfully.")
+    
 # ----------------------
 # Current User
 # ----------------------

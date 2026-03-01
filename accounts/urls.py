@@ -11,10 +11,10 @@ from accounts.views import (
     ResendEmailView,
     CurrentUserView,
     UpdateAvatarView,
-    GoogleLoginView,
-    GoogleLoginCallbackView,
-    GitHubLoginView,
-    GitHubLoginCallbackView,
+    # GoogleLoginView,
+    # GoogleLoginCallbackView,
+    # GitHubLoginView,
+    # GitHubLoginCallbackView,
     ChangeRoleView,
     Setup2FAView,
     Enable2FAView,
@@ -52,10 +52,10 @@ urlpatterns = [
     # ------------------------
     # OAuth
     # ------------------------
-    path('google/', GoogleLoginView.as_view(), name='google-login'),
-    path('google/callback/', GoogleLoginCallbackView.as_view(), name='google-callback'),
-    path('github/', GitHubLoginView.as_view(), name='github-login'),
-    path('github/callback/', GitHubLoginCallbackView.as_view(), name='github-callback'),
+    # path('google/', GoogleLoginView.as_view(), name='google-login'),
+    # path('google/callback/', GoogleLoginCallbackView.as_view(), name='google-callback'),
+    # path('github/', GitHubLoginView.as_view(), name='github-login'),
+    # path('github/callback/', GitHubLoginCallbackView.as_view(), name='github-callback'),
 
     # ------------------------
     # Role Management
